@@ -1,0 +1,256 @@
+#!/usr/bin/env python
+
+import argparse
+import sys
+import re
+import traceback
+import math
+
+class PodToolError(Exception):
+  def __init__(self, err):
+    self.err = err
+  def __str__(self):
+    return repr(self.err)
+
+class PodTool():
+  """
+  Mealy machine: its process() method invokes callbacks which result 
+  in output and state changes based on the pat matched
+  """
+  def __init__(self, rules, debug=False, cutoff=1):
+    self.callbacks = {}
+    for s0, pat, callback, s1 in rules:
+      if self.callbacks.has_key(s0):
+        self.callbacks[s0].append((pat, callback, s1))
+      else:
+        self.callbacks[s0] = [(pat, callback, s1)]
+    self.rules = {}
+    for state in self.callbacks.keys():
+      parts = []
+      for pat, callback, s1 in self.callbacks[state]:
+        if '(%s)' % pat in parts:
+          raise PodToolError('Duplicate pattern %s in state %s\n' % (pat, state))
+        parts.append('(%s)' % pat)
+      try:
+        self.rules[state] = re.compile('|'.join(parts), re.M|re.I)
+      except re.error, err:
+        raise PodToolError(str(err))
+    self.kv = {}
+    self.state = None
+    self.line = 0
+    self.text = ''
+    self.debug = debug
+    self.cutoff = cutoff
+
+  def process(self, line, text):
+    self.line = line
+    self.text = text
+    match = self.rules[self.state].match(self.text)
+    if match != None:
+      if self.debug:
+        sys.stderr.write('[DEBUG] line %s matched %s\n' % (self.line, match.groups()))
+      pat, callback, s1 = self.callbacks[self.state][match.lastindex-1]
+      try:
+        callback(self)
+      except Exception:
+        raise PodToolError('\n%sin %s(%s)\n' % (traceback.format_exc(), callback.func_name, self.line))
+      self.state = s1
+
+def save_PSEN(podtool):
+  data = podtool.text.split(',')
+  if not podtool.kv.has_key('psen'):
+    podtool.kv['psen'] = {}
+    podtool.kv['psen'][0] = {data[1]: data[3]}
+  else:
+    podtool.kv['psen'][0][data[1]] = data[3]
+
+def save_trkpt(podtool):
+  data = podtool.text.split(',')
+  if data[2] == 'A' and len(data) > 9:
+    podtool.kv['psen'][1] = {'ts': '20%s-%s-%s %s:%s:%s' % (
+      data[9][4:6], data[9][2:4], data[9][0:2],
+      data[1][0:2], data[1][2:4], data[1][4:6]
+    )}
+    lat = float(data[3][0:2])+float(data[3][2:]) / 60
+    if data[4] == 'S': lat *= -1
+    podtool.kv['psen'][1]['lat'] = lat
+    lon = float(data[5][0:3])+float(data[5][3:]) / 60
+    if data[6] == 'W': lon *= -1
+    podtool.kv['psen'][1]['lon'] = lon
+    if not podtool.kv.has_key('prev'):
+      podtool.kv['prev'] = float(data[1][4:6])
+      podtool.kv['count'] = 0
+    if max(0, float(data[1][4:6]) - podtool.kv['prev']) > podtool.cutoff:
+      podtool.kv['count'] += 1
+    if not podtool.kv.has_key('seg'+str(podtool.kv['count'])):
+      podtool.kv['seg'+str(podtool.kv['count'])] = []
+    podtool.kv['seg'+str(podtool.kv['count'])].append(podtool.kv['psen'])
+    podtool.kv['prev'] = float(data[1][4:6])
+    podtool.kv.pop('psen')
+ 
+def main():
+  rules = [
+    # initial state, transition pattern, callback, target state
+    (None, r'^\$PSEN,Noise', save_PSEN, 'Noise'),
+    ('Reading', r'^\$PSEN,Noise', save_PSEN, 'Noise'),
+    ('Noise', r'^\$PSEN,NOx', save_PSEN, 'Noise+NOx'),
+    ('Noise+NOx', r'^\$PSEN,COx', save_PSEN, 'Noise+NOx+COx'),
+    ('Noise+NOx+COx', r'^\$GPRMC', save_trkpt, 'Reading'),
+    ('Noise+NOx+COx', r'^\$PSEN,Noise', save_PSEN, 'Noise')
+  ]
+  parser = argparse.ArgumentParser(description='ECOsens Data Tool', epilog=str(rules))
+  parser.add_argument('logfile', type=argparse.FileType('r'), help='Sensaris move-it log data')
+  parser.add_argument('-e', dest='ext', default='csv', choices=['gpx', 'csv', 'json'], help='output format (default: csv)')
+  parser.add_argument('-s', dest='segment', type=int, help='data segment to extract')
+  parser.add_argument('-t', dest='tolerance', type=float, help='Douglas-Peucker downsampling tolerance')
+  parser.add_argument('-c', dest='cutoff', default='5', type=float, help='segment cutoff in s (default: 5)')
+  parser.add_argument('-v', dest='verbose', action='store_true', help='verbose')
+  args = parser.parse_args()
+  try:
+    pt = PodTool(rules, args.verbose, args.cutoff)
+  except PodToolError as e:
+    sys.stderr.write('Error in rules\n%s\n' % e.err)
+    return 1
+  with args.logfile as fh:
+    for line, text in enumerate(fh):
+      try:
+        pt.process(line+1, text.strip())
+      except PodToolError as e:
+        sys.stderr.write(e.err)
+        return 1
+  if not pt.kv.has_key('count'):
+    sys.stderr.write('No data found\n')
+    return 1
+  if pt.kv['count'] > 0:
+    if args.segment is None:
+      sys.stderr.write('Data has %i segments. Select which one to extract.\n' % (pt.kv['count']+1))
+      return 1
+    elif args.segment in range(0, pt.kv['count']+1):
+      seg = 'seg'+str(args.segment)
+    else:
+      sys.stderr.write('Segment out of range (%s)\n' % pt.kv['count'])
+      return 1
+  else:
+    seg = 'seg0'
+  #
+  # preamble
+  # 
+  if args.ext == 'gpx':
+    sys.stdout.write("""<?xml version="1.0"?>
+<gpx version="1.0"
+  creator="http://citizensensing.posterous.com"
+  xmlns="http://www.topografix.com/GPX/1/0"
+  xmlns:cs="http://citizensensing.posterous.com/ns/measurements/1/0">
+  <trk>
+    <name>%s</name>
+    <trkseg>
+""" % args.logfile.name)
+  elif args.ext == 'json':
+    sys.stdout.write('{ "type": "FeatureCollection",\n "features": [')
+  elif args.ext == 'csv':
+    sys.stdout.write('ts, Lon, Lat, COx, Noise, NOx\n')
+  #
+  # data
+  #
+  # Douglas-Peucker line simplification adapted from Alex Plugaru
+  # https://gist.github.com/1051247
+  if args.tolerance is not None:
+    anchor = 0
+    floater = len(pt.kv[seg]) - 1
+    stack = []
+    keep = set()
+    stack.append((anchor, floater))  
+    while stack:
+      anchor, floater = stack.pop()
+      # initialize line segment
+      if pt.kv[seg][floater][1]['lon'] != pt.kv[seg][anchor][1]['lon'] and pt.kv[seg][floater][1]['lat'] != pt.kv[seg][anchor][1]['lat']:
+        anchorX = pt.kv[seg][floater][1]['lon'] - pt.kv[seg][anchor][1]['lon']
+        anchorY = pt.kv[seg][floater][1]['lat'] - pt.kv[seg][anchor][1]['lat']
+        seg_len = math.sqrt(anchorX ** 2 + anchorY ** 2)
+        # get the unit vector
+        anchorX /= seg_len
+        anchorY /= seg_len
+      else:
+        anchorX = anchorY = seg_len = 0.0
+      # inner loop:
+      max_dist = 0.0
+      farthest = anchor + 1
+      for i in range(anchor + 1, floater):
+        dist_to_seg = 0.0
+        # compare to anchor
+        vecX = pt.kv[seg][i][1]['lon'] - pt.kv[seg][anchor][1]['lon']
+        vecY = pt.kv[seg][i][1]['lat'] - pt.kv[seg][anchor][1]['lat']
+        seg_len = math.sqrt(vecX ** 2 + vecY ** 2)
+        # dot product:
+        proj = vecX * anchorX + vecY * anchorY
+        if proj < 0.0:
+          dist_to_seg = seg_len
+        else: 
+          # compare to floater
+          vecX = pt.kv[seg][i][1]['lon'] - pt.kv[seg][floater][1]['lon']
+          vecY = pt.kv[seg][i][1]['lat'] - pt.kv[seg][floater][1]['lat']
+          seg_len = math.sqrt(vecX ** 2 + vecY ** 2)
+          # dot product:
+          proj = vecX * (-anchorX) + vecY * (-anchorY)
+          if proj < 0.0:
+            dist_to_seg = seg_len
+          else:  # calculate perpendicular distance to line (pythagoras)
+            dist_to_seg = math.sqrt(abs(seg_len ** 2 - proj ** 2))
+          if max_dist < dist_to_seg:
+            max_dist = dist_to_seg
+            farthest = i
+      if max_dist <= args.tolerance: # use line segment
+        keep.add(anchor)
+        keep.add(floater)
+      else:
+        stack.append((anchor, farthest))
+        stack.append((farthest, floater))
+    keep = list(keep)
+    keep.sort()
+    if args.verbose:
+      sys.stderr.write('[DEBUG] downsampled from %s to %s points\n' % (len(pt.kv[seg]), len(keep)))
+  # render data
+  flag = False
+  for n, item in enumerate(pt.kv[seg]):
+    if args.tolerance is not None and n not in keep:
+      continue
+    if args.ext == 'gpx':
+      sys.stdout.write("""      <trkpt lon="%.6f" lat="%.6f">
+        <time>%s</time>
+        <extensions>
+""" % (item[1]['lon'], item[1]['lat'], item[1]['ts']))
+    elif args.ext == 'json':
+      if flag:
+        sys.stdout.write('\n    },\n')
+      sys.stdout.write("""    { "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [%.6f, %.6f] },
+      "properties": { "ts": "%s" """ % (item[1]['lon'], item[1]['lat'], item[1]['ts']))
+    elif args.ext == 'csv':
+      sys.stdout.write('%s, %.6f, %.6f' % (item[1]['ts'], item[1]['lon'], item[1]['lat']))
+    for key in item[0].keys():
+      if args.ext == 'gpx':
+        sys.stdout.write('          <cs:%s>%s</cs:%s>\n' % (key, item[0][key], key))
+      elif args.ext == 'json':
+        sys.stdout.write(', "%s": "%s"' % (key, item[0][key]))
+      elif args.ext == 'csv':
+        sys.stdout.write(', %s' % item[0][key])
+    if args.ext == 'gpx':
+      sys.stdout.write("""        </extensions>
+      </trkpt>
+""")
+    elif args.ext == 'json':
+      sys.stdout.write('}')
+    elif args.ext == 'csv':
+      sys.stdout.write('\n')
+    flag = True
+  #
+  # postamble
+  #
+  if args.ext == 'gpx':
+    sys.stdout.write('    </trkseg>\n  </trk>\n</gpx>')
+  elif args.ext == 'json':
+    sys.stdout.write('\n    }\n  ]\n}')
+  return 0
+
+if __name__ == '__main__':
+  sys.exit(main())
