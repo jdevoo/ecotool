@@ -85,7 +85,7 @@ def save_PSEN(podtool):
 
 def save_trkpt(podtool):
   data = podtool.text.split(',')
-  if data[2] == 'A' and len(data) > 9:
+  if len(data) > 9 and data[2] == 'A':
     podtool.kv['psen'][1] = {'ts': '20%s-%s-%s %s:%s:%s' % (
       data[9][4:6], data[9][2:4], data[9][0:2],
       data[1][0:2], data[1][2:4], data[1][4:6]
