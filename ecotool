@@ -77,11 +77,12 @@ class EcoTool():
 
 def save_PSEN(podtool):
   data = podtool.text.split(',')
-  if not podtool.kv.has_key('psen'):
-    podtool.kv['psen'] = {}
-    podtool.kv['psen'][0] = {data[1]: data[3]}
-  else:
-    podtool.kv['psen'][0][data[1]] = data[3]
+  if len(data) == 4:
+    if not podtool.kv.has_key('psen'):
+      podtool.kv['psen'] = {}
+      podtool.kv['psen'][0] = {data[1]: data[3]}
+    else:
+      podtool.kv['psen'][0][data[1]] = data[3]
 
 def save_trkpt(podtool):
   data = podtool.text.split(',')
