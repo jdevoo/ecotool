@@ -158,9 +158,9 @@ def main():
   if args.ext == 'gpx':
     sys.stdout.write("""<?xml version="1.0"?>
 <gpx version="1.0"
-  creator="http://citizensensing.posterous.com"
+  creator="http://citizensensing.cc"
   xmlns="http://www.topografix.com/GPX/1/0"
-  xmlns:cs="http://citizensensing.posterous.com/ns/measurements/1/0">
+  xmlns:cs="http://citizensensing.cc/ns/measurements/1/0">
   <trk>
     <name>%s</name>
     <trkseg>
